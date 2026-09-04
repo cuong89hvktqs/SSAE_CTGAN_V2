@@ -1,0 +1,160 @@
+"""SDV wrapper for M01AEOrgCTGAN (joint CTGAN + M01AE in original feature space)."""
+
+import os
+import cloudpickle
+
+from ctgan.synthesizers.m01ae_org_ctgan import M01AEOrgCTGAN
+from sdv.single_table.maectgan import MAECTGANSynthesizer, _validate_no_category_dtype
+from sdv.single_table.utils import detect_discrete_columns
+
+
+class M01AEOrgCTGANSynthesizer(MAECTGANSynthesizer):
+    """SDV wrapper for M01AEOrgCTGAN.
+
+    Joint training: CTGAN in transformed space; M01AE in original [0,1] space.
+    Fixes the BayesGMM-space degradation problem of M01AECTGANSynthesizer:
+      - Sigmoid decoder (original space)
+      - _add_noise_orig() using original-space statistics (larger variance)
+      - CTGAN samples inverse_transform()ed before noise/M01AE use
+    """
+
+    def __init__(
+        self,
+        metadata,
+        enforce_min_max_values=True,
+        enforce_rounding=True,
+        locales=None,
+        # ── CTGAN ─────────────────────────────────────────────────────────
+        embedding_dim=128,
+        generator_dim=(256, 256),
+        discriminator_dim=(256, 256),
+        generator_lr=2e-4,
+        generator_decay=1e-6,
+        discriminator_lr=2e-4,
+        discriminator_decay=1e-6,
+        batch_size=500,
+        discriminator_steps=1,
+        log_frequency=True,
+        verbose=False,
+        epochs=300,
+        pac=10,
+        cuda=True,
+        # ── M01AE ─────────────────────────────────────────────────────────
+        lamda=0.1,
+        margin=1.0,
+        mae_loss_mode="renormal",
+        mae_lr=1e-3,
+        noise_std=0.1,
+        noise_ratio=1.0,
+        noise_type="feature_outlier",
+        noise_r=5.0,
+        noise_k=0.1,
+        cat_noise_type="none",
+        cat_noise_ratio=1.0,
+        # ── Joint ─────────────────────────────────────────────────────────
+        type_train="noise_std",
+        mae_start_ratio=0.25,
+        patience=50,
+        # ── Misc ─────────────────────────────────────────────────────────
+        dataset="dataset",
+        path="results",
+    ):
+        if locales is None:
+            locales = ["en_US"]
+
+        from sdv.single_table.base import BaseSingleTableSynthesizer
+        BaseSingleTableSynthesizer.__init__(
+            self,
+            metadata=metadata,
+            enforce_min_max_values=enforce_min_max_values,
+            enforce_rounding=enforce_rounding,
+            locales=locales,
+        )
+
+        self.dataset = dataset
+        self.path = path
+        self.discrete_column = None
+
+        self._model_kwargs = {
+            "embedding_dim": embedding_dim,
+            "generator_dim": generator_dim,
+            "discriminator_dim": discriminator_dim,
+            "generator_lr": generator_lr,
+            "generator_decay": generator_decay,
+            "discriminator_lr": discriminator_lr,
+            "discriminator_decay": discriminator_decay,
+            "batch_size": batch_size,
+            "discriminator_steps": discriminator_steps,
+            "log_frequency": log_frequency,
+            "verbose": verbose,
+            "epochs": epochs,
+            "pac": pac,
+            "cuda": cuda,
+            "lamda": lamda,
+            "margin": margin,
+            "mae_loss_mode": str(mae_loss_mode),
+            "mae_lr": float(mae_lr),
+            "noise_std": float(noise_std),
+            "noise_ratio": float(noise_ratio),
+            "noise_type": str(noise_type),
+            "noise_r": float(noise_r),
+            "noise_k": float(noise_k),
+            "cat_noise_type": str(cat_noise_type),
+            "cat_noise_ratio": float(cat_noise_ratio),
+            "type_train": str(type_train),
+            "mae_start_ratio": float(mae_start_ratio),
+            "patience": int(patience),
+            "dataset": dataset,
+            "path": path,
+        }
+
+    def _fit(self, full_data, processed_data, val_data):
+        """Fit M01AEOrgCTGAN on preprocessed normal training data."""
+        _validate_no_category_dtype(processed_data)
+        _validate_no_category_dtype(full_data)
+        self._fitted = True
+
+        transformers = self._data_processor._hyper_transformer.field_transformers
+        discrete_columns = detect_discrete_columns(
+            self.get_metadata(), full_data, transformers
+        )
+
+        self._model = M01AEOrgCTGAN(**self._model_kwargs)
+        self.discrete_column = discrete_columns
+        self._model.set_epoch_best_callback(self._save_best_model)
+        self._model.fit(
+            full_data, processed_data, val_data,
+            discrete_columns=discrete_columns,
+        )
+
+    def get_loss_values(self):
+        """Return loss DataFrame from joint model."""
+        return self._model.get_loss_values()
+
+    def get_score(self, X_processed, y):
+        """Compute anomaly scores on SDV-processed data (org-space, no CTGAN transform)."""
+        return self._model.get_score(X_processed, y)
+
+    def get_threshold(self, X_val_processed):
+        """Compute thresholds from SDV-processed normal validation data."""
+        return self._model.get_threshold(X_val_processed)
+
+    def _save_best_model(
+        self, model, epoch,
+        threshold_re, threshold_z, threshold_95, threshold_95_total_loss,
+    ):
+        path = f"{self.path}/checkpoints"
+        os.makedirs(path, exist_ok=True)
+        path_file = f"{path}/MAE_{self.dataset}_best.pkl"
+        path_epoch = f"{path}/MAE_{self.dataset}_best_epoch.txt"
+        threshold_path = f"{path}/MAE_{self.dataset}_thresholds_best.pkl"
+
+        with open(path_file, "wb") as f:
+            cloudpickle.dump(self, f)
+        with open(path_epoch, "w") as f:
+            f.write(str(epoch))
+        with open(threshold_path, "wb") as f:
+            cloudpickle.dump(
+                (threshold_re, threshold_z, threshold_95, threshold_95_total_loss), f
+            )
+        print(f"[BEST] Saved best model at epoch {epoch}: {path_file}")
