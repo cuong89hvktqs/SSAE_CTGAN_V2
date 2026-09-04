@@ -37,12 +37,6 @@ SSAE ships with loaders for several public network-intrusion-detection datasets.
 | `nsl_kdd` | NSL-KDD |
 | `cic_iot` | CIC-IoT 2023 |
 | `wsn_ds` | WSN-DS |
-| `cic_ids` | CIC-IDS-2017 |
-| `cidds_001` | CIDDS-001 |
-| `insdn` | InSDN |
-| `bot_iot` | BoT-IoT |
-| `ton_iot` | ToN-IoT |
-| `nb_iot` | N-BaIoT |
 
 Each loader returns the dataset's official train/test split; SSAE further splits the normal-only rows of the training pool 80/20 into train/validation.
 
@@ -60,17 +54,6 @@ python train_mae01scale_max.py --d unsw --seed 42 --time 4 \
     --gate_stability 0.05 --gate_window 10 --cov_floor 0.05
 ```
 
-### Full sweep (recommended)
-
-Trains all 4 core datasets (UNSW-NB15, CIC-IoT 2023, NSL-KDD, WSN-DS) across seeds 42/43/44 with the paper's default hyperparameters:
-
-```bash
-cd Syn_ctgan
-bash run_mae01scale_max.sh [per]      # Linux/macOS
-run_mae01scale_max.bat [per]          # Windows
-```
-
-`per` (default `1.0`) is the fraction of the normal-only training pool to use — e.g. `0.1` trains on 10% of the available normal data, for a data-efficiency study.
 
 ### Key arguments
 
