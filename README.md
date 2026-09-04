@@ -9,7 +9,7 @@ This README covers **only SSAE** — how to install the project and train/evalua
 SSAE trains two components together, end to end, every epoch:
 
 1. **CTGAN** (generator + discriminator) — learns to synthesize realistic traffic samples, giving the model a source of *diverse*, data-driven pseudo-anomalies once training has progressed far enough.
-2. **A two-sided margin autoencoder (MAE)** — learns to reconstruct *normal* traffic well while keeping perturbed/synthetic samples ("pseudo-anomalies") outside a latent-space margin. At inference time, the anomaly score combines reconstruction error and latent-space margin violation.
+2. **A two-sided margin autoencoder (MiAE)** — learns to reconstruct *normal* traffic well while keeping perturbed/synthetic samples ("pseudo-anomalies") outside a latent-space margin. At inference time, the anomaly score combines reconstruction error and latent-space margin violation.
 
 Pseudo-anomalies come from two sources that are blended during training:
 - **P — perturbation-based**: Gaussian noise injected into real normal samples (a self-scaling amount, proportional to the mean latent norm of normal samples).
