@@ -1,4 +1,4 @@
-# SSAE — Self-Scaling Anomaly-margin Encoder
+# SSAE — Self-Supervised Autoencoder
 
 A research fork of [SDV](https://github.com/sdv-dev/SDV) / [CTGAN](https://github.com/sdv-dev/CTGAN) built around **SSAE** (implemented as `MAE01ScaleMax`): a network-intrusion anomaly detector that jointly trains a CTGAN generator (for data diversity) with a two-sided margin autoencoder, learning to separate normal traffic from pseudo-anomalies in latent space.
 
