@@ -78,17 +78,10 @@ Run `python train_mae01scale_max.py --help` for the complete list (noise/categor
 
 ### Fixed-epoch gate (ablation)
 
-To compare the adaptive gate against simply opening the CTGAN source at a fixed epoch (e.g. epoch 0, 30, or 50), pass `--gate_fixed_epoch N`. This bypasses the adaptive coefficient-of-variation check entirely:
+To compare the adaptive gate against simply opening the CTGAN source at a fixed epoch (e.g. epoch 0, 20, or 40), pass `--gate_fixed_epoch N`. This bypasses the adaptive coefficient-of-variation check entirely:
 
 ```bash
-python train_mae01scale_max.py --d unsw --seed 42 --time 6 --gate_fixed_epoch 50 [...]
-```
-
-A ready-made sweep across gate epochs and seeds is provided:
-
-```bash
-bash run_gatefix.sh [per]      # Linux/macOS
-run_gatefix.bat [per]          # Windows
+python train_mae01scale_max.py --d unsw --seed 42 --time 6 --gate_fixed_epoch 40 [...]
 ```
 
 ## Output layout
