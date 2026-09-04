@@ -106,6 +106,12 @@ checkpoints/
 
 Each `test_mode_*.csv` reports AUC, F1, MCC, Precision, Recall, and Accuracy at a specific scoring/thresholding convention (reconstruction-only, latent-only, or combined "total" score; thresholded at either a fixed percentile or a distribution-based cutoff).
 
+**Which result is the official one**: `checkpoints/best_auc/test_mode_total95.csv` is SSAE's primary result — the combined reconstruction + latent-margin ("total") score, thresholded at the 95th percentile of validation-normal scores, evaluated on the best-by-validation-AUC checkpoint. Of that file, only the **AUC** value is reported as-is (AUC is threshold-independent, so it is unaffected by the 95th-percentile choice below); its F1/MCC/Precision/Recall are tied to that specific 95th-percentile threshold and are not used for the metrics below.
+
+This training script does **not** compute TPR@FAR=1%/5% or an MCC at a 99th-percentile threshold — those need a separate evaluation pass over the already-trained checkpoint (no retraining):
+- **MCC at a 99th-percentile threshold**: `python eval_ssae_val99.py --dataset <d> --seed <s> --per <per>` — reloads the checkpoint and recomputes F1/MCC/etc. at the 99th percentile of validation-normal scores, saving `checkpoints/best_auc/test_mode_total99.csv`.
+- **TPR@FAR=1% / TPR@FAR=5%**: `python val_perattack_mae01scale_max.py --d <d>` — per-attack breakdown, with each threshold set from a percentile of the test-normal score distribution (a different, FAR-based convention, independent of the 95%/99% validation threshold above).
+
 ## License
 
 This project builds on SDV/CTGAN; see `LICENSE` for terms.
