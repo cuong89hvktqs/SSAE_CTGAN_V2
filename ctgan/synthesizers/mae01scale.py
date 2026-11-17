@@ -308,14 +308,36 @@ class MAE01Scale(M01AECAdapt):
         _ema_alpha = 0.3
         _ema_disc  = None
 
+        # ── Optional component profiler (SSAE_PROFILE=1) ───────────────────
+        # Opt-in, env-var controlled, zero effect on the default path. Times
+        # the per-step blocks (CTGAN D+G updates, pseudo-intrusion generation,
+        # MiAE update) and the per-epoch blocks (validation / checkpoint
+        # selection, gate + adaptive-scale bookkeeping) with cuda.synchronize()
+        # fences, and records peak GPU memory. Rows go to
+        # <self.path>/profile_components.csv at the end of fit().
+        import os as _os, time as _time
+        _profile = _os.environ.get("SSAE_PROFILE", "0") == "1"
+        _prof_rows = []
+        _cuda = torch.cuda.is_available() and str(self._device).startswith("cuda")
+        def _now():
+            if _cuda:
+                torch.cuda.synchronize()
+            return _time.perf_counter()
+        if _profile and _cuda:
+            torch.cuda.reset_peak_memory_stats()
+        _t_fit_start = _time.perf_counter()
+
         epoch_iter = tqdm(range(self._epochs), disable=(not self._verbose))
 
         for i in epoch_iter:
             g_accum = d_accum = 0.0
             mae_accum = re_accum = lat_accum = 0.0
             z_normal_accum = z_pseudo_accum = 0.0
+            _t_ctgan = _t_pag = _t_mae = 0.0
+            _t_epoch0 = _time.perf_counter()
 
             for _step in range(steps_per_epoch):
+                if _profile: _t0 = _now()
 
                 # ── Discriminator step(s) ──────────────────────────────────
                 for _ in range(self._discriminator_steps):
@@ -380,6 +402,7 @@ class MAE01Scale(M01AECAdapt):
 
                 g_accum += loss_g.detach().cpu().item()
                 d_accum += loss_d.detach().cpu().item()
+                if _profile: _t1 = _now(); _t_ctgan += _t1 - _t0
 
                 # ── M01AE step ─────────────────────────────────────────────
                 use_ctgan    = self._ctgan_gate_open and (self.type_train != "noise")
@@ -388,6 +411,7 @@ class MAE01Scale(M01AECAdapt):
                 ctgan_sample = fakeact.detach() if use_ctgan else None
                 x_pseudo     = self._make_pseudo_anomaly(real_normal, ctgan_sample, use_ctgan)
                 x_normal_mae = real_normal
+                if _profile: _t2 = _now(); _t_pag += _t2 - _t1
 
                 x_combined = torch.cat([x_normal_mae, x_pseudo], dim=0)
                 y_combined = torch.cat([
@@ -414,6 +438,7 @@ class MAE01Scale(M01AECAdapt):
                     split_n = x_normal_mae.size(0)
                     z_normal_accum += torch.norm(z[:split_n].detach(), p=2, dim=1).mean().item()
                     z_pseudo_accum += torch.norm(z[split_n:].detach(), p=2, dim=1).mean().item()
+                if _profile: _t_mae += _now() - _t2
 
             # ── End of epoch ───────────────────────────────────────────────
             avg_g   = g_accum   / steps_per_epoch
@@ -425,8 +450,10 @@ class MAE01Scale(M01AECAdapt):
             avg_z_normal = z_normal_accum / steps_per_epoch
             avg_z_pseudo = z_pseudo_accum / steps_per_epoch
 
+            if _profile: _t3 = _now()
             val_loss, val_re, val_lat = self._validate_mae(val_loader)
             thresholds = self._compute_thresholds(val_loader)
+            if _profile: _t4 = _now(); _t_val = _t4 - _t3
 
             # Gate: EMA disc_loss CoV check
             _ema_disc = avg_d if _ema_disc is None else _ema_alpha * avg_d + (1 - _ema_alpha) * _ema_disc
@@ -440,8 +467,10 @@ class MAE01Scale(M01AECAdapt):
             else:
                 self.noise_std = self._initial_noise_std
 
+            if _profile: _t5 = _now(); _t_gate = _t5 - _t4
             ctgan_active = int(self._ctgan_gate_open and self.type_train != "noise")
             val_auc, val_sep = self._evaluate_pseudo_validation_auc(val_loader, bool(ctgan_active))
+            if _profile: _t6 = _now(); _t_val += _t6 - _t5
 
             # Periodic generated-data snapshot -- only once the gate is open
             if self._ctgan_gate_open and (i % self.SNAPSHOT_EVERY == 0):
@@ -490,21 +519,25 @@ class MAE01Scale(M01AECAdapt):
                     )
                 print(f"  [BEST_AUC] val_auc={val_auc:.6f} at epoch {i}")
 
-            # Best-by-loss + early stopping
+            # Best-by-loss + early stopping (checkpoint saving to disk disabled
+            # below -- only the best_auc checkpoint is persisted now, to keep
+            # per-run disk usage down across many seeds. The in-memory
+            # best_val_loss/patience tracking is kept unchanged since early
+            # stopping still depends on it.)
             if val_loss < best_val_loss - 1e-8:
                 best_val_loss    = val_loss
                 best_enc_state   = copy.deepcopy(self._mae_enc.state_dict())
                 best_dec_state   = copy.deepcopy(self._mae_dec.state_dict())
                 best_thresholds  = thresholds
                 patience_counter = 0
-                if self._on_epoch_best_callbacks is not None:
-                    self._on_epoch_best_callbacks(
-                        model=self, epoch=i, checkpoint_kind="loss",
-                        threshold_re=thresholds["threshold_re"],
-                        threshold_z=thresholds["threshold_z"],
-                        threshold_95=thresholds["threshold_95_latent"],
-                        threshold_95_total_loss=thresholds["threshold_95_total"],
-                    )
+                # if self._on_epoch_best_callbacks is not None:
+                #     self._on_epoch_best_callbacks(
+                #         model=self, epoch=i, checkpoint_kind="loss",
+                #         threshold_re=thresholds["threshold_re"],
+                #         threshold_z=thresholds["threshold_z"],
+                #         threshold_95=thresholds["threshold_95_latent"],
+                #         threshold_95_total_loss=thresholds["threshold_95_total"],
+                #     )
                 print(f"  [BEST] val_loss={val_loss:.6f} at epoch {i}")
             else:
                 patience_counter += 1
@@ -514,8 +547,27 @@ class MAE01Scale(M01AECAdapt):
 
             if self._on_epoch_end_callbacks is not None:
                 self._on_epoch_end_callbacks(model=self, epoch=i)
+            if _profile:
+                _t7 = _now()
+                _t_epoch = _t7 - _t_epoch0
+                _t_ckpt = _t7 - _t6
+                _prof_rows.append({
+                    "Epoch": i, "gate_open": int(self._ctgan_gate_open),
+                    "steps_per_epoch": steps_per_epoch,
+                    "t_ctgan_s": _t_ctgan, "t_pag_s": _t_pag, "t_mae_s": _t_mae,
+                    "t_val_s": _t_val, "t_gate_s": _t_gate, "t_ckpt_s": _t_ckpt,
+                    "t_epoch_s": _t_epoch,
+                    "peak_mem_MB": (torch.cuda.max_memory_allocated() / 2**20) if _cuda else float("nan"),
+                })
 
         self.loss_values = pd.DataFrame(loss_rows)
+        if _profile:
+            _df = pd.DataFrame(_prof_rows)
+            _df.attrs["t_prep_s"] = 0.0
+            _out_dir = getattr(self, "path", None) or "."
+            _df.to_csv(_os.path.join(_out_dir, "profile_components.csv"), index=False)
+            print(f"[profile] wrote {_os.path.join(_out_dir, 'profile_components.csv')}  "
+                  f"total fit time {_time.perf_counter() - _t_fit_start:.1f}s")
 
         if best_enc_state is not None:
             self._mae_enc.load_state_dict(best_enc_state)

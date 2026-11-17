@@ -71,8 +71,10 @@ class M01AECTGAN(BaseSynthesizer):
         Std of Gaussian noise added to continuous features.
     noise_ratio : float  (0, 1]
         Fraction of continuous features perturbed per sample.
-    noise_type : str  {"none", "global"}
+    noise_type : str  {"none", "global", "uniform"}
         Noise type for continuous features. "global" = N(0, noise_std^2).
+        "uniform" = U(-a, a) with a = noise_std*sqrt(3), i.e. variance-matched
+        to "global" (same std, different distribution shape).
     cat_noise_type : str  {"none", "shuffle", "flip", "combined"}
         Noise type for categorical (one-hot) features.
     cat_noise_ratio : float  (0, 1]
@@ -175,8 +177,8 @@ class M01AECTGAN(BaseSynthesizer):
             raise ValueError("mae_loss_mode must be 'origin' or 'renormal'.")
         if self.type_train not in {"noise", "std", "noise_std"}:
             raise ValueError("type_train must be 'noise', 'std', or 'noise_std'.")
-        if self.noise_type not in {"none", "global", "feature", "feature_outlier"}:
-            raise ValueError("noise_type must be 'none', 'global', 'feature', or 'feature_outlier'.")
+        if self.noise_type not in {"none", "global", "uniform", "feature", "feature_outlier"}:
+            raise ValueError("noise_type must be 'none', 'global', 'uniform', 'feature', or 'feature_outlier'.")
         if self.cat_noise_type not in {"none", "shuffle", "flip", "combined"}:
             raise ValueError("cat_noise_type must be 'none', 'shuffle', 'flip', or 'combined'.")
         if not 0.0 <= self.mae_start_ratio < 1.0:
@@ -337,6 +339,7 @@ class M01AECTGAN(BaseSynthesizer):
         Continuous dims (tanh ∈ [-1,1]):
           'none'           → no perturbation
           'global'         → N(0, noise_std²), clamp [-1,1]
+          'uniform'        → U(-a,a), a = noise_std·√3 (variance-matched to 'global'), clamp [-1,1]
           'feature'        → per-feature N(0, (noise_std·σᵢ)²), clamp [-1,1]
           'feature_outlier'→ set to μᵢ + noise_r·noise_k·σᵢ, clamp [-1,1]
 
@@ -362,6 +365,13 @@ class M01AECTGAN(BaseSynthesizer):
 
             if self.noise_type == "global":
                 noise = torch.randn(x.size(0), n_to_noise, device=x.device) * self.noise_std
+                x_noisy[:, selected] = torch.clamp(
+                    x_noisy[:, selected] + noise, -1.0, 1.0
+                )
+
+            elif self.noise_type == "uniform":
+                a = self.noise_std * sqrt(3)
+                noise = (torch.rand(x.size(0), n_to_noise, device=x.device) * 2 - 1) * a
                 x_noisy[:, selected] = torch.clamp(
                     x_noisy[:, selected] + noise, -1.0, 1.0
                 )

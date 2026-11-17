@@ -111,6 +111,13 @@ class MAE01ScaleMax(MAE01Scale):
         self.tol       = float(tol)
         self.gate_fixed_epoch = None if gate_fixed_epoch is None else int(gate_fixed_epoch)
 
+    # ── Override: skip the periodic generated_data_snapshots.csv dump ──────
+    # (visualization-only artifact from MAE01Scale; disabled here to reduce
+    # per-run disk usage across many seeds -- MAE01Scale itself is untouched).
+
+    def _save_generated_snapshot(self, epoch, normal_tensor_cpu, chunk=4096):
+        pass
+
     # ── Only override: OR gate (CoV branch  OR  near-zero equilibrium branch) ──
 
     def _maybe_open_gate(self, epoch, disc_loss_history):

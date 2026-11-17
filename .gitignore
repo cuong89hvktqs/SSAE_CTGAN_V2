@@ -136,3 +136,97 @@ tutorials/**/*.pkl
 tutorials/**/*metadata.json
 notebooks
 tests/readme_test
+
+# =============================================================================
+# SSAE-only release. Everything below limits the repository to the SSAE code
+# and the files needed to install, train and evaluate it. Local files are not
+# deleted; they are only excluded from git.
+# =============================================================================
+
+# --- Syn_ctgan: ignore everything, then re-include the SSAE files -----------
+Syn_ctgan/*
+!Syn_ctgan/train_mae01scale_max.py
+!Syn_ctgan/process_data.py
+!Syn_ctgan/val_perattack_mae01scale_max.py
+!Syn_ctgan/eval_ssae_val99.py
+!Syn_ctgan/requirements.txt
+!Syn_ctgan/run_mae01scale_max_PARAMS.md
+!Syn_ctgan/run_mae01scale_max.sh
+!Syn_ctgan/run_mae01scale_max.bat
+!Syn_ctgan/run_mae01scale_max_seeds45_51.sh
+!Syn_ctgan/run_mae01scale_max_seeds45_51.bat
+
+# --- SSAE ablation and supplementary experiments ----------------------------
+# Run scripts (all call train_mae01scale_max.py or one of the variants below)
+!Syn_ctgan/run_ablation_lambda_mae01scale_max.sh
+!Syn_ctgan/run_ablation_lambda_mae01scale_max_seeds45_51.sh
+!Syn_ctgan/run_ablation_lambda_mae01scale_max_seeds45_51.bat
+!Syn_ctgan/run_ablation_m_mae01scale_max.sh
+!Syn_ctgan/run_ablation_m_mae01scale_max_seeds45_51.sh
+!Syn_ctgan/run_ablation_m_mae01scale_max_seeds45_51.bat
+!Syn_ctgan/run_ablation_noise_t09.sh
+!Syn_ctgan/run_pseudo_source_t05.sh
+!Syn_ctgan/run_pseudo_source_t05.bat
+!Syn_ctgan/run_pseudo_source_seeds45_51.sh
+!Syn_ctgan/run_pseudo_source_seeds45_51.bat
+!Syn_ctgan/run_gatefix_t06.sh
+!Syn_ctgan/run_gatefix_t06.bat
+!Syn_ctgan/run_gatefix_seeds45_51.sh
+!Syn_ctgan/run_gatefix_seeds45_51.bat
+!Syn_ctgan/run_t07_m9_l1.sh
+!Syn_ctgan/run_t07_m9_l1.bat
+!Syn_ctgan/run_t03_gendata.sh
+!Syn_ctgan/run_control_a.sh
+!Syn_ctgan/run_control_b.sh
+!Syn_ctgan/run_control_ab_seeds43_44.sh
+!Syn_ctgan/run_unsw_repr_ablation.sh
+!Syn_ctgan/run_unsw_onehot_seeds43_51.sh
+!Syn_ctgan/run_ssae_profile_t11.sh
+# Training variants used by the run scripts above
+!Syn_ctgan/train_control_a.py
+!Syn_ctgan/train_control_b.py
+!Syn_ctgan/train_mae01scale_max_gendata.py
+!Syn_ctgan/train_mae01scale_max_unsw_onehot.py
+# Evaluation of SSAE checkpoints (no baseline results required)
+!Syn_ctgan/eval_ssae_*.py
+!Syn_ctgan/stress_test_val_auc.py
+!Syn_ctgan/measure_ssae_inference_time.py
+!Syn_ctgan/check_pseudo_val_selection.py
+!Syn_ctgan/compare_gen_vs_attack.py
+!Syn_ctgan/eval_realistic_ratio_t04_seed42.py
+!Syn_ctgan/build_coverage_per_class_unsw.py
+# Helper modules imported by the evaluation scripts above
+!Syn_ctgan/reeval_ssae_runs.py
+!Syn_ctgan/backfill_ssae_old_seeds.py
+!Syn_ctgan/build_seeds_summary_excel.py
+!Syn_ctgan/build_table6_coverage_density.py
+
+# --- ctgan / sdv: experimental variants used only by excluded scripts -------
+# Variants imported by ctgan/synthesizers/__init__.py or
+# sdv/single_table/__init__.py must stay, otherwise `import ctgan` fails.
+ctgan/synthesizers/ctmaectgan.py
+ctgan/synthesizers/mae01scale_hard.py
+ctgan/synthesizers/maectgan_v01.py
+ctgan/synthesizers/maectgan_v02py
+sdv/single_table/cleanmaectgan.py
+sdv/single_table/ctgan_v2.py
+sdv/single_table/ctmaectgan.py
+sdv/single_table/mae01scale_hard.py
+sdv/single_table/maeafterctgan.py
+sdv/single_table/maectgan_org.py
+
+# --- Upstream SDV/CTGAN boilerplate not needed to install or run SSAE -------
+docs/
+examples/
+scripts/
+tasks.py
+Makefile
+static_code_analysis.txt
+codecov.yml
+apt.txt
+latest_requirements.txt
+CONTRIBUTING.rst
+AUTHORS.rst
+
+# --- Personal assistant notes -----------------------------------------------
+CLAUDE.md

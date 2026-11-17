@@ -41,7 +41,9 @@ import cloudpickle
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import average_precision_score, confusion_matrix, roc_auc_score
+from sklearn.metrics import (
+    average_precision_score, confusion_matrix, matthews_corrcoef, roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -204,11 +206,16 @@ ATTACK_LOADERS = {
 # Metrics (same definitions as the notebook)
 # =============================================================================
 
-def evaluate_ids_metrics(y_true, scores, normal_thresholds):
-    """AUC (%), PR-AUC (%), TPR@FAR levels.
+def evaluate_ids_metrics(y_true, scores, normal_thresholds, val_thresholds=None):
+    """AUC (%), PR-AUC (%), TPR@FAR levels, and (optionally) MCC at the
+    val95/val99 thresholds.
 
     normal_thresholds: {far: threshold} precomputed from the FULL normal
     test scores (identical to the notebook: subset normals == all normals).
+    val_thresholds: optional {95: threshold_95, 99: threshold_99} from the
+    val-normal percentile (same thresholds as best_auc/test_mode_total.csv)
+    -- when given, adds MCC_95/MCC_99 to the result using the SAME
+    convention as evaluate_best_auc_checkpoint() (strict ">" cutoff).
     """
     y_true = np.asarray(y_true).astype(int)
     scores = np.asarray(scores)
@@ -221,6 +228,12 @@ def evaluate_ids_metrics(y_true, scores, normal_thresholds):
         y_pred = (scores >= threshold).astype(int)
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
         results[f"TPR@FAR={int(far * 100)}%"] = tp / (tp + fn + 1e-12) * 100
+
+    if val_thresholds:
+        for percentile, threshold in val_thresholds.items():
+            y_pred = (scores > threshold).astype(int)
+            results[f"MCC_{percentile}"] = matthews_corrcoef(y_true, y_pred) * 100
+
     return results
 
 

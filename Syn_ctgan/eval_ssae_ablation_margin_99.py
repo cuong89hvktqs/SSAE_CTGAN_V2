@@ -1,13 +1,15 @@
 """Margin-ablation table: AUC / TPR@FAR=1% / MCC(val99) for every margin
-value found under the t_02 ablation-sweep tree, at a FIXED lambda (default
-0.1 -- the project's own default/main-config lambda). Mirror of
-eval_ssae_ablation_lambda.py -- see that script's docstring for the full
+value found under the t_02 ablation-sweep tree (res/t_02_SSAE_se_<seed>/),
+at a FIXED lambda (default 0.1 -- the project's own default/main-config
+lambda). The baseline m=2.0 point is not part of t_02 (it lives in t_04).
+Mirror of eval_ssae_ablation_lambda_99.py -- see that script's docstring for the full
 threshold-convention explanation (AUC threshold-independent; TPR@FAR=1%
 from test-normal 99th percentile; MCC from val99 = validation-normal 99th
-percentile).
+percentile; split rebuilt via
+backfill_ssae_old_seeds.load_and_score()).
 
 Usage:
-    python eval_ssae_ablation_margin.py --seeds 42,43,44 --time_tag 02 \
+    python eval_ssae_ablation_margin_99.py --seeds 42,43,44 --time_tag 02 \
         --lamda 0.1 --per 1.0
 Output: res/ablation_margin_t<tag>_per<per>.csv          (raw per-seed rows)
         res/ablation_margin_t<tag>_per<per>_table.csv    (final pivoted table)
@@ -30,7 +32,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, matthews_corrcoef
 
-from val_perattack_mae01scale_max import load_synthesizer
+import backfill_ssae_old_seeds as bf
 
 DATASETS = ["unsw", "nsl_kdd", "cic_iot", "wsn_ds"]
 DATASET_LABELS = {"unsw": "UNSW-NB15", "nsl_kdd": "NSL-KDD", "cic_iot": "CIC-IoT 2023", "wsn_ds": "WSN-DS"}
@@ -45,7 +47,7 @@ def infer_dataset(scenario_name):
 
 
 def find_scenarios(root, seed, time_tag, per):
-    pattern = os.path.join(root, f"mae01scale_max_se_{seed}_t_{time_tag}", f"per_{per}", "*")
+    pattern = os.path.join(root, f"t_{time_tag}_SSAE_se_{seed}", f"per_{per}", "*")
     for run_dir in sorted(glob.glob(pattern)):
         if not os.path.isdir(run_dir):
             continue
@@ -60,23 +62,14 @@ def find_scenarios(root, seed, time_tag, per):
         yield dict(run_dir=run_dir, dataset=dataset, margin=margin, lamda=lamda, scenario=scenario_name)
 
 
-def evaluate_one(run_dir, dataset):
-    x_test_path = os.path.join(run_dir, f"{dataset}_X_test.csv")
-    y_test_path = os.path.join(run_dir, f"{dataset}_y_test.csv")
-    x_val_path = os.path.join(run_dir, f"{dataset}_X_val_normal.csv")
-    model_path = os.path.join(run_dir, "checkpoints", f"MAE_{dataset}_best_auc.pkl")
-    for p in (x_test_path, y_test_path, x_val_path, model_path):
-        if not os.path.exists(p):
-            raise FileNotFoundError(p)
-
-    synthesizer = load_synthesizer(model_path)
-    X_val = pd.read_csv(x_val_path)
-    X_test = pd.read_csv(x_test_path)
-    y_test = pd.read_csv(y_test_path)["label"]
-
-    _, _, total_val, _ = synthesizer.get_score(X_val, np.zeros(len(X_val)))
-    _, _, total_test, y_true = synthesizer.get_score(X_test, y_test)
-    y_true = (np.asarray(y_true) != 0).astype(int)
+def evaluate_one(run_dir, dataset, seed):
+    # The new run layout no longer keeps <dataset>_X_test.csv/_X_val_normal.csv,
+    # so the exact training-time val/test split is rebuilt from the raw loader
+    # (same seed, same 80/20 split) and scored with the run's best_auc checkpoint.
+    scored = bf.load_and_score(run_dir, dataset, seed)
+    if scored is None:
+        raise FileNotFoundError(os.path.join(run_dir, f"MAE_{dataset}_best_auc.pkl"))
+    total_val, total_test, y_true = scored
 
     auc = roc_auc_score(y_true, total_test) * 100 if len(np.unique(y_true)) >= 2 else 0.0
 
@@ -95,12 +88,16 @@ def evaluate_one(run_dir, dataset):
 
 def main():
     parser = argparse.ArgumentParser("SSAE margin-ablation table (AUC / TPR@FAR=1% / MCC@val99)")
-    parser.add_argument("--seeds", type=str, default="42,43,44")
+    parser.add_argument("--seeds", type=str, default=",".join(str(s) for s in range(42, 52)))
     parser.add_argument("--time_tag", type=str, default="02")
     parser.add_argument("--per", type=str, default="1.0")
     parser.add_argument("--lamda", type=float, default=0.1, help="fixed lambda to hold while sweeping margin")
     parser.add_argument("--root", type=str, default=os.path.join(BASE_DIR, "res"))
     args = parser.parse_args()
+
+    if float(args.per) != 1.0:
+        # bf.rebuild_val_test_split() reproduces the per=1.0 split only
+        parser.error("only --per 1.0 is supported")
 
     seeds = [int(s) for s in args.seeds.split(",")]
     rows = []
@@ -110,7 +107,7 @@ def main():
                 continue
             print(f"[seed={seed}] {sc['dataset']} m={sc['margin']} l={sc['lamda']} -> {sc['scenario']}")
             try:
-                m = evaluate_one(sc["run_dir"], sc["dataset"])
+                m = evaluate_one(sc["run_dir"], sc["dataset"], seed)
                 rows.append(dict(Seed=seed, Dataset=sc["dataset"], Margin=sc["margin"], **m))
             except Exception as e:
                 print(f"  [FAILED] {e}")

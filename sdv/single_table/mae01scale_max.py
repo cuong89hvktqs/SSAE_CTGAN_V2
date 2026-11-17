@@ -1,5 +1,9 @@
 """SDV wrapper for MAE01ScaleMax (CoV-floor fix)."""
 
+import os
+
+import cloudpickle
+
 from ctgan.synthesizers.mae01scale_max import MAE01ScaleMax
 from sdv.single_table.mae01scale import MAE01ScaleSynthesizer
 from sdv.single_table.maectgan import _validate_no_category_dtype
@@ -113,6 +117,36 @@ class MAE01ScaleMaxSynthesizer(MAE01ScaleSynthesizer):
         self._model_kwargs["gate_fixed_epoch"] = (
             None if gate_fixed_epoch is None else int(gate_fixed_epoch)
         )
+
+    def _save_best_model(
+        self, model, epoch,
+        threshold_re, threshold_z, threshold_95, threshold_95_total_loss,
+        checkpoint_kind="loss",
+    ):
+        """Persist the current best checkpoint directly under self.path
+        (no "checkpoints" subfolder) -- keeps per-run disk paths shorter,
+        scoped to MAE01ScaleMax only (see m01aectgan.py's _save_best_model
+        for the shared/original behavior used by other synthesizers).
+        """
+        if checkpoint_kind not in {"loss", "auc"}:
+            raise ValueError("checkpoint_kind must be 'loss' or 'auc'.")
+        suffix = "" if checkpoint_kind == "loss" else f"_{checkpoint_kind}"
+
+        path = self.path
+        os.makedirs(path, exist_ok=True)
+        path_file = f"{path}/MAE_{self.dataset}_best{suffix}.pkl"
+        path_epoch = f"{path}/MAE_{self.dataset}_best{suffix}_epoch.txt"
+        threshold_path = f"{path}/MAE_{self.dataset}_thresholds_best{suffix}.pkl"
+
+        with open(path_file, "wb") as f:
+            cloudpickle.dump(self, f)
+        with open(path_epoch, "w") as f:
+            f.write(str(epoch))
+        with open(threshold_path, "wb") as f:
+            cloudpickle.dump(
+                (threshold_re, threshold_z, threshold_95, threshold_95_total_loss), f
+            )
+        print(f"[BEST:{checkpoint_kind}] Saved best model at epoch {epoch}: {path_file}")
 
     def _fit(self, full_data, processed_data, val_data):
         _validate_no_category_dtype(processed_data)

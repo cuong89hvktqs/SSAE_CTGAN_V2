@@ -31,10 +31,12 @@ import torch
 from sdv.metadata import SingleTableMetadata
 from sdv.single_table.mae01scale_max import MAE01ScaleMaxSynthesizer
 from sklearn.metrics import (
-    accuracy_score, confusion_matrix, f1_score,
+    accuracy_score, average_precision_score, confusion_matrix, f1_score,
     matthews_corrcoef, precision_score, recall_score, roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
+
+from val_perattack_mae01scale_max import ATTACK_LOADERS, FAR_LEVELS, evaluate_ids_metrics
 
 from process_data import (
     load_data_bot_iot,
@@ -67,6 +69,17 @@ parser.add_argument("--per",           type=float, default=1.0)
 parser.add_argument("--seed",          type=int,   default=42)
 parser.add_argument("--time",          type=int,   default=1)
 parser.add_argument("--n_max_samples", type=int,   default=500_000)
+parser.add_argument("--out_tag", type=str, default=None,
+                    help="override the top-level result folder name "
+                         "(res/<out_tag>/...) instead of the default "
+                         "t_<time>_SSAE_se_<seed>. Lets several ablation "
+                         "configs for the same seed share one named folder "
+                         "(e.g. t_09_noise_rate) instead of the per-seed "
+                         "default; callers adding more seeds under the same "
+                         "tag must suffix it themselves (e.g. "
+                         "t_09_noise_rate_se_43) to avoid collisions, since "
+                         "the per-config subfolder name does not encode the "
+                         "seed.")
 
 # M01AE
 parser.add_argument("--lae",           type=float, default=0.1)
@@ -79,7 +92,7 @@ parser.add_argument("--mae_lr",        type=float, default=1e-3)
 parser.add_argument("--noise_std",   type=float, default=0.3)
 parser.add_argument("--noise_ratio", type=float, default=0.5)
 parser.add_argument("--noise_type",  type=str,   default="global",
-                    choices=["none", "global", "feature", "feature_outlier"])
+                    choices=["none", "global", "uniform", "feature", "feature_outlier"])
 parser.add_argument("--noise_r",     type=float, default=1.0)
 parser.add_argument("--noise_k",     type=float, default=3.0)
 parser.add_argument("--cat_noise_type",  type=str, default="combined",
@@ -108,6 +121,20 @@ parser.add_argument("--snapshot_stride", type=int,  default=None,
                          "Default: 1, except nb_iot which defaults to 20 "
                          "(its ~210K normal rows would otherwise make the "
                          "snapshot file huge).")
+
+# Input-representation ablation (reviewer follow-up: is the CTGAN one-hot
+# representation the main cost on UNSW-NB15?). Default leaves the pipeline
+# untouched.
+parser.add_argument("--cat_mode", type=str, default="default",
+                    choices=["default", "drop", "freq", "allnum"],
+                    help="default: SDV-detected categoricals are one-hot encoded "
+                         "(paper setting). drop: remove the object-dtype columns "
+                         "(UNSW: proto/service/state) before preprocessing. "
+                         "freq: replace each object-dtype column by its relative "
+                         "frequency in the normal training split (unseen -> 0). "
+                         "allnum: freq + force EVERY column to sdtype='numerical' "
+                         "(no one-hot at all, GMM mode encoding only). "
+                         "Non-default modes add a _cat<mode> suffix to the run folder.")
 
 # CoV-floor fix
 parser.add_argument("--cov_floor", type=float, default=0.05,
@@ -185,7 +212,7 @@ seed            = args.seed
 n_max_samples   = args.n_max_samples
 run_time        = args.time
 time_tag        = f"{int(run_time):02d}"
-run_folder      = f"mae01scale_max_se_{seed}_t_{time_tag}"
+run_folder      = args.out_tag if args.out_tag else f"t_{time_tag}_SSAE_se_{seed}"
 
 noise_scale    = args.noise_scale
 gate_stability = args.gate_stability
@@ -245,13 +272,15 @@ if noise_type in {"feature", "feature_outlier"}:
     _noise_tag = f"{noise_type}_r{noise_r}_k{noise_k}"
 
 _gatefix_tag = "" if gate_fixed_epoch is None else f"_gf{gate_fixed_epoch}"
+cat_mode = args.cat_mode
+_catmode_tag = "" if cat_mode == "default" else f"_cat{cat_mode}"
 results_dir = os.path.join(
     BASE_DIR,
     f"res/{run_folder}/per_{percentage}/"
     f"{dataset}_{epochs}e_m{margin}_l{lamda}"
-    f"_{mae_loss_mode}_scalemax-{type_train}_gw{gate_window}_gs{gate_stability}"
+    f"_{mae_loss_mode}_{type_train}_gw{gate_window}_gs{gate_stability}"
     f"_cf{cov_floor}_ns{noise_scale}_nstd{noise_std}_{_noise_tag}_conra{noise_ratio}"
-    f"__cat_{cat_noise_type}_catra{cat_noise_ratio}{_gatefix_tag}"
+    f"__cat_{cat_noise_type}_catra{cat_noise_ratio}{_gatefix_tag}{_catmode_tag}"
 )
 os.makedirs(results_dir, exist_ok=True)
 
@@ -288,8 +317,36 @@ def train_mae01scale_max(epochs):
     X_test_raw = df_full.iloc[-n_test:].reset_index(drop=True)
     X_test_raw.columns = X_test_raw.columns.map(str)
 
+    # ── Input-representation ablation (--cat_mode) ────────────────────────
+    if cat_mode != "default":
+        obj_cols = [c for c in X_train_normal.columns
+                    if X_train_normal[c].dtype == object or str(X_train_normal[c].dtype) == "string"]
+        if cat_mode == "drop":
+            X_train_normal = X_train_normal.drop(columns=obj_cols)
+            X_val_raw = X_val_raw.drop(columns=obj_cols)
+            X_test_raw = X_test_raw.drop(columns=obj_cols)
+            print(f"[cat_mode=drop] dropped object columns: {obj_cols}")
+        else:  # freq / allnum: relative frequency fitted on the normal TRAIN split only
+            X_train_normal = X_train_normal.copy()
+            X_val_raw = X_val_raw.copy()
+            X_test_raw = X_test_raw.copy()
+            for c in obj_cols:
+                freq = X_train_normal[c].value_counts(normalize=True)
+                for df_ in (X_train_normal, X_val_raw, X_test_raw):
+                    df_[c] = df_[c].map(freq).fillna(0.0).astype(float)
+            print(f"[cat_mode={cat_mode}] frequency-encoded object columns: {obj_cols}")
+        with open(os.path.join(results_dir, "cat_mode.txt"), "w", encoding="utf-8") as _f:
+            _f.write(f"cat_mode={cat_mode}\nobject_columns={obj_cols}\n")
+
     metadata = SingleTableMetadata()
     metadata.detect_from_dataframe(X_train_normal)
+
+    if cat_mode == "allnum":
+        cols_before = metadata.to_dict()["columns"]
+        n_cat = sum(1 for v in cols_before.values() if v.get("sdtype") != "numerical")
+        metadata.update_columns(X_train_normal.columns.tolist(), sdtype="numerical")
+        print(f"[cat_mode=allnum] forced all {len(X_train_normal.columns)} columns to "
+              f"sdtype='numerical' ({n_cat} were auto-detected as categorical).")
 
     if dataset == "nb_iot":
         # All 115 nb_iot features are pre-extracted flow statistics (weights,
@@ -369,12 +426,18 @@ def train_mae01scale_max(epochs):
 
     synthesizer._fit(X_train_proc, X_train_proc, X_val)
 
-    thresholds = synthesizer.get_threshold(X_val)
-    print("Thresholds:", thresholds)
-    save_threshold(thresholds, results_dir, f"{dataset}_mae01scale_max_thresholds.pkl")
-
-    model_path = os.path.join(results_dir, f"MAE01ScaleMax_{dataset}_{epochs}e.pkl")
-    synthesizer.save(model_path)
+    # Final-model threshold computation + whole-synthesizer checkpoint save
+    # disabled -- only the best_auc checkpoint (already persisted via the
+    # dual-checkpoint callback during _fit()) is kept, to reduce per-run
+    # disk usage across many seeds. This "final" model was just the
+    # best-by-val-loss-restored weights anyway (see mae01scale.py's fit()),
+    # so it duplicated the (now also disabled) best_loss checkpoint.
+    # thresholds = synthesizer.get_threshold(X_val)
+    # print("Thresholds:", thresholds)
+    # save_threshold(thresholds, results_dir, f"{dataset}_mae01scale_max_thresholds.pkl")
+    #
+    # model_path = os.path.join(results_dir, f"MAE01ScaleMax_{dataset}_{epochs}e.pkl")
+    # synthesizer.save(model_path)
 
     # ── Plots ─────────────────────────────────────────────────────────────
     loss_df  = synthesizer._model.get_loss_values()
@@ -453,7 +516,7 @@ def train_mae01scale_max(epochs):
         plt.close(fig)
 
     print("Training complete.")
-    return synthesizer, thresholds, X_test
+    return synthesizer, X_test
 
 
 # =============================================================================
@@ -501,54 +564,183 @@ def predict_and_evaluate(scores, y_true, threshold, save_dir, filename, score_mo
             "Recall": recall, "ACC": acc}
 
 
-def run_evaluation(synthesizer, X_test, y_test, thresholds, save_dir):
-    re_errors, z_norm, total_scores, y_true = synthesizer.get_score(X_test, y_test)
+# -- Old multi-file (re/latent/latent95/total95), both-checkpoint evaluation
+# path -- superseded by evaluate_best_auc_checkpoint() below (best_auc only,
+# single test_mode_total.csv). Kept commented out for reference.
+# def run_evaluation(synthesizer, X_test, y_test, thresholds, save_dir):
+#     re_errors, z_norm, total_scores, y_true = synthesizer.get_score(X_test, y_test)
+#
+#     predict_and_evaluate(re_errors,    y_true, thresholds["threshold_re"],
+#                          save_dir, "test_mode_re.csv",       score_mode="std")
+#     predict_and_evaluate(z_norm,       y_true, thresholds["threshold_z"],
+#                          save_dir, "test_mode_latent.csv",   score_mode="std")
+#     predict_and_evaluate(z_norm,       y_true, thresholds["threshold_95_latent"],
+#                          save_dir, "test_mode_latent95.csv", score_mode="dist")
+#     predict_and_evaluate(total_scores, y_true, thresholds["threshold_95_total"],
+#                          save_dir, "test_mode_total95.csv",  score_mode="dist")
+#
+#
+# def post_train_checkpoint_evaluation(results_dir, dataset, val_type):
+#     """Evaluate one best checkpoint; results saved to checkpoints/best_<val_type>/."""
+#     if val_type not in {"loss", "auc"}:
+#         raise ValueError("val_type must be 'loss' or 'auc'.")
+#     suffix = "" if val_type == "loss" else f"_{val_type}"
+#
+#     print(f"\n--- Post-train eval: best_{val_type} checkpoint ---")
+#     x_test_path    = os.path.join(results_dir, f"{dataset}_X_test.csv")
+#     y_test_path    = os.path.join(results_dir, f"{dataset}_y_test.csv")
+#     checkpoint_dir = os.path.join(results_dir, "checkpoints")
+#     model_path     = os.path.join(checkpoint_dir, f"MAE_{dataset}_best{suffix}.pkl")
+#     thr_path       = os.path.join(checkpoint_dir, f"MAE_{dataset}_thresholds_best{suffix}.pkl")
+#     save_dir       = os.path.join(checkpoint_dir, f"best_{val_type}")
+#
+#     for p in [x_test_path, y_test_path, model_path, thr_path]:
+#         if not os.path.exists(p):
+#             print(f"[WARN] Missing: {p} -- skip.")
+#             return
+#
+#     X_test_csv = pd.read_csv(x_test_path)
+#     y_test_csv = pd.read_csv(y_test_path)["label"]
+#
+#     with open(model_path, "rb") as f:
+#         best_synth = cloudpickle.load(f)
+#     with open(thr_path, "rb") as f:
+#         thr_re, thr_z, thr_95, thr_95_total = cloudpickle.load(f)
+#
+#     best_thresholds = {
+#         "threshold_re":        thr_re,
+#         "threshold_z":         thr_z,
+#         "threshold_95_latent": thr_95,
+#         "threshold_95_total":  thr_95_total,
+#     }
+#     run_evaluation(best_synth, X_test_csv, y_test_csv, best_thresholds, save_dir)
+#     print(f"Checkpoint eval done -> {save_dir}")
 
-    predict_and_evaluate(re_errors,    y_true, thresholds["threshold_re"],
-                         save_dir, "test_mode_re.csv",       score_mode="std")
-    predict_and_evaluate(z_norm,       y_true, thresholds["threshold_z"],
-                         save_dir, "test_mode_latent.csv",   score_mode="std")
-    predict_and_evaluate(z_norm,       y_true, thresholds["threshold_95_latent"],
-                         save_dir, "test_mode_latent95.csv", score_mode="dist")
-    predict_and_evaluate(total_scores, y_true, thresholds["threshold_95_total"],
-                         save_dir, "test_mode_total95.csv",  score_mode="dist")
 
-
-def post_train_checkpoint_evaluation(results_dir, dataset, val_type):
-    """Evaluate one best checkpoint; results saved to checkpoints/best_<val_type>/."""
-    if val_type not in {"loss", "auc"}:
-        raise ValueError("val_type must be 'loss' or 'auc'.")
-    suffix = "" if val_type == "loss" else f"_{val_type}"
-
-    print(f"\n--- Post-train eval: best_{val_type} checkpoint ---")
+def evaluate_best_auc_checkpoint(results_dir, dataset):
+    """Evaluate the best_auc checkpoint only, saving a single
+    <results_dir>/best_auc/test_mode_total.csv with two threshold regimes:
+      - 95th percentile of validation-normal "total" score (re + lamda*||z||^2)
+        -> TPR@FAR=5%, AUC_95, MCC_95
+      - 99th percentile of validation-normal "total" score
+        -> TPR@FAR=1%, AUC_99, MCC_99
+    AUC is threshold-independent (identical under both regimes here); it is
+    still reported twice (AUC_95/AUC_99) to keep both rows self-contained.
+    Reuses <dataset>_X_val_normal.csv/_y_val_normal.csv/_X_test.csv/_y_test.csv
+    (deleted by the caller right after this returns).
+    """
+    print("\n--- Post-train eval: best_auc checkpoint ---")
+    x_val_path     = os.path.join(results_dir, f"{dataset}_X_val_normal.csv")
+    y_val_path     = os.path.join(results_dir, f"{dataset}_y_val_normal.csv")
     x_test_path    = os.path.join(results_dir, f"{dataset}_X_test.csv")
     y_test_path    = os.path.join(results_dir, f"{dataset}_y_test.csv")
-    checkpoint_dir = os.path.join(results_dir, "checkpoints")
-    model_path     = os.path.join(checkpoint_dir, f"MAE_{dataset}_best{suffix}.pkl")
-    thr_path       = os.path.join(checkpoint_dir, f"MAE_{dataset}_thresholds_best{suffix}.pkl")
-    save_dir       = os.path.join(checkpoint_dir, f"best_{val_type}")
+    model_path     = os.path.join(results_dir, f"MAE_{dataset}_best_auc.pkl")
+    save_dir       = os.path.join(results_dir, "best_auc")
 
-    for p in [x_test_path, y_test_path, model_path, thr_path]:
+    for p in [x_val_path, y_val_path, x_test_path, y_test_path, model_path]:
         if not os.path.exists(p):
             print(f"[WARN] Missing: {p} -- skip.")
-            return
+            return None
 
+    X_val_csv  = pd.read_csv(x_val_path)
+    y_val_csv  = pd.read_csv(y_val_path)["label"]
     X_test_csv = pd.read_csv(x_test_path)
     y_test_csv = pd.read_csv(y_test_path)["label"]
 
     with open(model_path, "rb") as f:
         best_synth = cloudpickle.load(f)
-    with open(thr_path, "rb") as f:
-        thr_re, thr_z, thr_95, thr_95_total = cloudpickle.load(f)
 
-    best_thresholds = {
-        "threshold_re":        thr_re,
-        "threshold_z":         thr_z,
-        "threshold_95_latent": thr_95,
-        "threshold_95_total":  thr_95_total,
+    _, _, val_total,  _      = best_synth.get_score(X_val_csv, y_val_csv)
+    _, _, test_total, y_true = best_synth.get_score(X_test_csv, y_test_csv)
+    y_true_bin = (np.asarray(y_true) != 0).astype(int)
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, "test_mode_total.csv")
+    val_thresholds = {}
+    with open(save_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Metric", "Value"])
+        for percentile, far_label in ((95, "TPR@FAR=5%"), (99, "TPR@FAR=1%")):
+            threshold = float(np.percentile(val_total, percentile))
+            val_thresholds[percentile] = threshold
+            y_pred = (np.asarray(test_total) > threshold).astype(int)
+
+            auc = roc_auc_score(y_true_bin, test_total) * 100 if len(np.unique(y_true_bin)) >= 2 else 0.0
+            mcc = matthews_corrcoef(y_true_bin, y_pred) * 100
+            tpr = recall_score(y_true_bin, y_pred, zero_division=0) * 100
+
+            w.writerow([f"Threshold_{percentile}", f"{threshold:.6f}"])
+            w.writerow([far_label,                 f"{tpr:.6f}"])
+            w.writerow([f"AUC_{percentile}",        f"{auc:.6f}"])
+            w.writerow([f"MCC_{percentile}",        f"{mcc:.6f}"])
+
+            print(f"  [{far_label} @ p{percentile}] AUC_{percentile}={auc:.2f}%  "
+                  f"MCC_{percentile}={mcc:.2f}%  {far_label}={tpr:.2f}%  thr={threshold:.6f}")
+
+    print(f"Checkpoint eval done -> {save_path}")
+    return best_synth, X_test_csv, y_test_csv, np.asarray(test_total), y_true_bin, val_thresholds
+
+
+def evaluate_per_attack(results_dir, dataset, seed, test_total, y_true_bin, val_thresholds):
+    """Per-attack breakdown for the best_auc checkpoint, saved alongside
+    test_mode_total.csv as <results_dir>/best_auc/per_attack_seeds.csv.
+
+    Reuses the "total" scores already computed by evaluate_best_auc_checkpoint
+    (no re-loading/re-scoring). TPR@FAR=1%/5% use the FAR-based convention
+    (percentile of TEST-normal scores), independent of the val95/99
+    thresholds used in test_mode_total.csv -- same convention as
+    val_perattack_mae01scale_max.py. MCC_95/MCC_99 reuse the EXACT SAME
+    val95/val99 thresholds already computed for test_mode_total.csv, so
+    they stay consistent with the primary result table.
+    """
+    loader = ATTACK_LOADERS.get(dataset)
+    if loader is None:
+        print(f"[WARN] No attack-label loader for dataset '{dataset}' -- "
+              f"skip per_attack_seeds.csv.")
+        return
+
+    attack_labels, normal_tag = loader(seed)
+    if len(attack_labels) != len(test_total):
+        print(f"[WARN] attack labels ({len(attack_labels)}) != test scores "
+              f"({len(test_total)}) -- skip per_attack_seeds.csv.")
+        return
+
+    normal_mask = (attack_labels == normal_tag).to_numpy()
+    n_normal = int(normal_mask.sum())
+    attacks = sorted(a for a in attack_labels.unique() if a != normal_tag)
+
+    scores_normal = test_total[normal_mask]
+    normal_thresholds = {
+        far: np.percentile(scores_normal, 100 * (1 - far)) for far in FAR_LEVELS
     }
-    run_evaluation(best_synth, X_test_csv, y_test_csv, best_thresholds, save_dir)
-    print(f"Checkpoint eval done -> {save_dir}")
+
+    rows = []
+    for attack in attacks:
+        atk_mask = (attack_labels == attack).to_numpy()
+        sub_scores = np.concatenate([scores_normal, test_total[atk_mask]])
+        sub_y = np.concatenate([
+            np.zeros(n_normal, dtype=int),
+            np.ones(int(atk_mask.sum()), dtype=int),
+        ])
+        metrics = evaluate_ids_metrics(sub_y, sub_scores, normal_thresholds, val_thresholds)
+        rows.append({
+            "Dataset": dataset,
+            "Seed": seed,
+            "Attack": attack,
+            "N": int(atk_mask.sum()),
+            "Score": "total",
+            **metrics,
+        })
+
+    if not rows:
+        print(f"[WARN] No attack types found for '{dataset}' -- skip per_attack_seeds.csv.")
+        return
+
+    save_dir = os.path.join(results_dir, "best_auc")
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, "per_attack_seeds.csv")
+    pd.DataFrame(rows).to_csv(save_path, index=False)
+    print(f"Per-attack eval done -> {save_path}")
 
 
 # =============================================================================
@@ -557,8 +749,20 @@ def post_train_checkpoint_evaluation(results_dir, dataset, val_type):
 
 if __name__ == "__main__":
     print("=== MAE01ScaleMax Training ===")
-    synthesizer, thresholds, X_test = train_mae01scale_max(epochs=epochs)
-    run_evaluation(synthesizer, X_test, y_test, thresholds, results_dir)
-    post_train_checkpoint_evaluation(results_dir, dataset, "loss")
-    post_train_checkpoint_evaluation(results_dir, dataset, "auc")
+    synthesizer, X_test = train_mae01scale_max(epochs=epochs)
+    eval_result = evaluate_best_auc_checkpoint(results_dir, dataset)
+    if eval_result is not None:
+        _, _, _, test_total, y_true_bin, val_thresholds = eval_result
+        evaluate_per_attack(results_dir, dataset, seed, test_total, y_true_bin, val_thresholds)
+
+    # Cleanup: these CTGAN-preprocessed intermediate CSVs are only needed to
+    # reproduce the val/test split for evaluation above; delete them now to
+    # keep per-run disk usage down across many seeds.
+    for _fname in (
+        f"{dataset}_X_val_normal.csv", f"{dataset}_y_val_normal.csv",
+        f"{dataset}_X_test.csv", f"{dataset}_y_test.csv",
+    ):
+        _fpath = os.path.join(results_dir, _fname)
+        if os.path.exists(_fpath):
+            os.remove(_fpath)
     print("=== Done ===")
